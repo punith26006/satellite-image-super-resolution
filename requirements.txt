@@ -4,3 +4,5 @@ numpy
 matplotlib
 opencv-python
 Pillow
+tqdm
+tifffile

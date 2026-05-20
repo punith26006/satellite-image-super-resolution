@@ -8,11 +8,12 @@ Satellite images often suffer from low resolution due to limitations in image ac
 
 ## Features
 
-- Deep Learning based Super Resolution
+- Deep Learning based Super Resolution (SRMamba-T inspired architecture)
 - PyTorch implementation
-- Satellite image enhancement
+- Satellite image enhancement (4× upscale)
 - Model training and inference
-- Test image generation
+- PSNR / SSIM evaluation metrics
+- Visual comparison grids (LR | Bicubic | SR | HR)
 
 ## Technologies Used
 
@@ -28,56 +29,49 @@ Satellite images often suffer from low resolution due to limitations in image ac
 ```text
 satellite-image-super-resolution/
 │
-├── notebookf4890831d9.ipynb
-├── model_ds1.pth
-├── test_inference/
-├── satellite_sr_results/
+├── satellite_sr_training.ipynb   # Training notebook (run on Kaggle)
+├── test_inference.py             # Testing / inference script
+├── sat_sr_model.pth              # Pre-trained model weights
+├── satellite_sr_results.png      # Sample results
 ├── README.md
 └── requirements.txt
 ```
 
-## Dataset
+## Datasets
 
-Datasets used:
-- DIV2K Dataset
-- Satellite Image Dataset
-- Planet Dataset
+This project uses the following Kaggle datasets:
+- **DIV2K** — Standard SR benchmark dataset
+- **Planets Dataset** — Planet satellite imagery for training
+- **4× Satellite Image Super Resolution** — HR/LR satellite image pairs for evaluation
 
-## Model
+## Model Architecture
 
-The model was trained using PyTorch for enhancing low-resolution satellite images into higher-resolution outputs.
+SRMamba-T inspired SR network with:
+- Residual blocks for local feature extraction
+- Channel attention for spectral recalibration
+- Spatial attention for satellite spatial structure focus
+- PixelShuffle (×2 chained twice) for stable 4× upsampling
 
-## How to Run
+## How to Use on Kaggle
 
-### Clone Repository
+### Training
+1. Create a new Kaggle notebook with GPU enabled
+2. Add the **Planets Dataset** (`nikitarom/planets-dataset`) as input
+3. Upload or paste the code from `satellite_sr_training.ipynb`
+4. Run all cells — the trained model saves to `/kaggle/working/satellite_sr_model.pth`
 
-```bash
-git clone https://github.com/yourusername/satellite-image-super-resolution.git
-```
-
-### Install Requirements
-
-```bash
-pip install -r requirements.txt
-```
-
-### Run Notebook
-
-Open the notebook:
-
-```bash
-jupyter notebook
-```
-
-Then run:
-
-```text
-notebookf4890831d9.ipynb
-```
+### Testing / Inference
+1. Create a new Kaggle notebook with GPU enabled
+2. Add these datasets as input:
+   - **DIV2K** (`eugeneshenderov/div2k-dataset-for-super-resolution`)
+   - **4× Satellite SR** (`cristobaltudela/4x-satellite-image-super-resolution`)
+3. Import this repository as a Kaggle dataset (or upload `sat_sr_model.pth`)
+4. Upload or paste the code from `test_inference.py`
+5. The script auto-detects the checkpoint location and runs evaluation
 
 ## Results
 
-The model successfully improves image clarity and sharpness for satellite imagery.
+The model successfully improves image clarity and sharpness for satellite imagery, producing PSNR gains over bicubic interpolation baseline.
 
 ## Future Improvements
 

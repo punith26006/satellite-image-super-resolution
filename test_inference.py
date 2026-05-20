@@ -34,9 +34,30 @@ print(f"Device : {DEVICE}")
 
 
 # ─────────────────────────────────────────
-# PATHS  — exact structure from your Kaggle
+# PATHS  — auto-detect for Kaggle
 # ─────────────────────────────────────────
-CHECKPOINT  = "/kaggle/working/sat_sr_model.pth"   # your trained weights
+
+# --- Checkpoint: search multiple possible locations ---
+CHECKPOINT_CANDIDATES = [
+    "/kaggle/working/satellite_sr_model.pth",
+    "/kaggle/working/sat_sr_model.pth",
+    "/kaggle/input/satellite-image-super-resolution/sat_sr_model.pth",
+    "/kaggle/input/satellite-image-super-resolution/satellite_sr_model.pth",
+    os.path.join(os.path.dirname(__file__), "sat_sr_model.pth"),
+    os.path.join(os.path.dirname(__file__), "satellite_sr_model.pth"),
+]
+
+# Also search for any .pth under /kaggle/input that matches
+for _root, _dirs, _files in os.walk("/kaggle/input") if os.path.isdir("/kaggle/input") else []:
+    for _f in _files:
+        if _f.endswith('.pth') and 'sr' in _f.lower():
+            CHECKPOINT_CANDIDATES.append(os.path.join(_root, _f))
+
+CHECKPOINT = None
+for _c in CHECKPOINT_CANDIDATES:
+    if os.path.exists(_c):
+        CHECKPOINT = _c
+        break
 
 # Satellite test images
 SAT_HR      = "/kaggle/input/4x-satellite-image-super-resolution/HR_0.5m"
@@ -57,76 +78,97 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 
 # ─────────────────────────────────────────
-# MODEL  (must match training architecture)
+# MODEL  (MUST match training architecture exactly)
 # ─────────────────────────────────────────
 class ResidualBlock(nn.Module):
-    def __init__(self, nf):
+    def __init__(self, num_feat):
         super().__init__()
-        self.body = nn.Sequential(
-            nn.Conv2d(nf, nf, 3, 1, 1), nn.ReLU(inplace=True),
-            nn.Conv2d(nf, nf, 3, 1, 1)
-        )
-    def forward(self, x): return x + self.body(x)
-
-class ChannelAttention(nn.Module):
-    def __init__(self, nf, r=16):
-        super().__init__()
-        mid = max(nf // r, 4)
-        self.attn = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Linear(nf, mid), nn.ReLU(inplace=True),
-            nn.Linear(mid, nf), nn.Sigmoid()
+        self.block = nn.Sequential(
+            nn.Conv2d(num_feat, num_feat, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(num_feat, num_feat, 3, padding=1),
         )
     def forward(self, x):
-        return x * self.attn(x).view(x.shape[0], x.shape[1], 1, 1)
+        return x + self.block(x)
+
+class ChannelAttention(nn.Module):
+    def __init__(self, num_feat, reduction=16):
+        super().__init__()
+        mid = max(num_feat // reduction, 4)
+        self.attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(num_feat, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, num_feat),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        w = self.attention(x).unsqueeze(-1).unsqueeze(-1)
+        return x * w
 
 class SpatialAttention(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Conv2d(2, 1, 7, padding=3)
-        self.sig  = nn.Sigmoid()
+        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
+        self.sigmoid = nn.Sigmoid()
     def forward(self, x):
-        avg = x.mean(1, keepdim=True)
-        mx  = x.max(1, keepdim=True).values
-        return x * self.sig(self.conv(torch.cat([avg, mx], 1)))
+        avg_pool = torch.mean(x, dim=1, keepdim=True)
+        max_pool, _ = torch.max(x, dim=1, keepdim=True)
+        spatial = torch.cat([avg_pool, max_pool], dim=1)
+        spatial = self.sigmoid(self.conv(spatial))
+        return x * spatial
 
 class DeepFeatureBlock(nn.Module):
-    def __init__(self, nf, nb):
+    def __init__(self, num_feat, num_blocks):
         super().__init__()
-        self.res  = nn.Sequential(*[ResidualBlock(nf) for _ in range(nb)])
-        self.ca   = ChannelAttention(nf)
-        self.sa   = SpatialAttention()
-        self.tail = nn.Conv2d(nf, nf, 3, 1, 1)
+        self.res_blocks   = nn.Sequential(*[ResidualBlock(num_feat) for _ in range(num_blocks)])
+        self.channel_attn = ChannelAttention(num_feat)
+        self.spatial_attn = SpatialAttention()
+        self.conv_tail    = nn.Conv2d(num_feat, num_feat, 3, padding=1)
     def forward(self, x):
-        f = self.res(x); f = self.ca(f); f = self.sa(f)
-        return x + self.tail(f)
+        feat = self.res_blocks(x)
+        feat = self.channel_attn(feat)
+        feat = self.spatial_attn(feat)
+        feat = self.conv_tail(feat)
+        return feat + x
 
 class SatelliteSRNet(nn.Module):
-    def __init__(self, scale=4, nf=64, nb=8, in_ch=3):
+    def __init__(self, scale=4, num_feat=64, num_blocks=8, in_channels=3):
         super().__init__()
-        self.shallow = nn.Conv2d(in_ch, nf, 3, 1, 1)
-        self.deep    = DeepFeatureBlock(nf, nb)
-        self.fusion  = nn.Conv2d(nf, nf, 3, 1, 1)
-        self.up = nn.Sequential(
-            nn.Conv2d(nf, nf*4, 3, 1, 1), nn.PixelShuffle(2), nn.ReLU(inplace=True),
-            nn.Conv2d(nf, nf*4, 3, 1, 1), nn.PixelShuffle(2), nn.ReLU(inplace=True),
-            nn.Conv2d(nf, in_ch, 3, 1, 1)
+        self.scale = scale
+        self.shallow_conv = nn.Conv2d(in_channels, num_feat, 3, padding=1)
+        self.deep_extract = DeepFeatureBlock(num_feat, num_blocks)
+        self.fusion_conv  = nn.Conv2d(num_feat, num_feat, 3, padding=1)
+        self.upsample = nn.Sequential(
+            nn.Conv2d(num_feat, num_feat * 4, 3, padding=1),
+            nn.PixelShuffle(2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(num_feat, num_feat * 4, 3, padding=1),
+            nn.PixelShuffle(2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(num_feat, in_channels, 3, padding=1),
         )
     def forward(self, x):
-        s = self.shallow(x)
-        d = self.deep(s)
-        return self.up(self.fusion(d + s)).clamp(0, 1)
+        shallow = self.shallow_conv(x)
+        deep    = self.deep_extract(shallow)
+        fused   = self.fusion_conv(deep + shallow)
+        out     = self.upsample(fused)
+        return out.clamp(0, 1)
 
 # ── Load checkpoint ──────────────────────────────────────────
-model = SatelliteSRNet(scale=SCALE, nf=NUM_FEAT, nb=NUM_BLOCKS, in_ch=IN_CH).to(DEVICE)
+model = SatelliteSRNet(scale=SCALE, num_feat=NUM_FEAT, num_blocks=NUM_BLOCKS, in_channels=IN_CH).to(DEVICE)
 
-if os.path.exists(CHECKPOINT):
+if CHECKPOINT and os.path.exists(CHECKPOINT):
     model.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
     print(f"✓ Loaded checkpoint: {CHECKPOINT}")
 else:
-    print(f"✗ Checkpoint not found at {CHECKPOINT}")
-    print("  Make sure you have run training first!")
-    raise FileNotFoundError(CHECKPOINT)
+    print("✗ Checkpoint not found! Searched locations:")
+    for c in CHECKPOINT_CANDIDATES:
+        print(f"    {c}")
+    print("\n  Make sure sat_sr_model.pth is accessible.")
+    print("  If you imported the repo as a Kaggle dataset, it should be under /kaggle/input/")
+    raise FileNotFoundError("No checkpoint found. See above for searched locations.")
 
 model.eval()
 n_params = sum(p.numel() for p in model.parameters())
@@ -139,6 +181,8 @@ print(f"  Model params: {n_params:,}")
 IMG_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
 
 def list_images(folder):
+    if not os.path.isdir(folder):
+        return []
     return sorted([
         os.path.join(folder, f) for f in os.listdir(folder)
         if os.path.splitext(f)[1].lower() in IMG_EXTS
@@ -166,7 +210,7 @@ def load_img(path, ch=3):
     return arr
 
 def to_tensor(arr):
-    return torch.from_numpy(arr.transpose(2,0,1)).float().unsqueeze(0)   # [1,C,H,W]
+    return torch.from_numpy(arr.transpose(2,0,1)).float().unsqueeze(0)
 
 def to_numpy(t):
     """Tensor [1,C,H,W] or [C,H,W] → numpy (H,W,C) clipped to [0,1]."""
@@ -197,17 +241,9 @@ def ssim(p, t, ks=11, C1=1e-4, C2=9e-4):
 # ─────────────────────────────────────────
 @torch.no_grad()
 def run_inference(lr_path, hr_path=None):
-    """
-    Run SR on one LR image.
-    Returns dict with tensors and metrics (if HR provided).
-    """
     lr_np = load_img(lr_path, IN_CH)
-    lr_t  = to_tensor(lr_np).to(DEVICE)           # [1,C,H,W]
-
-    # Super-resolve
-    sr_t  = model(lr_t)                            # [1,C,4H,4W]
-
-    # Bicubic baseline (same resolution as SR)
+    lr_t  = to_tensor(lr_np).to(DEVICE)
+    sr_t  = model(lr_t)
     bic_t = F.interpolate(lr_t, scale_factor=SCALE,
                           mode='bicubic', align_corners=False).clamp(0,1)
 
@@ -220,13 +256,10 @@ def run_inference(lr_path, hr_path=None):
 
     if hr_path and os.path.exists(hr_path):
         hr_np = load_img(hr_path, IN_CH)
-        hr_t  = to_tensor(hr_np)                   # [1,C,H,W]
-
-        # Resize HR to match SR output if needed (handles slight size mismatches)
+        hr_t  = to_tensor(hr_np)
         if hr_t.shape[-2:] != sr_t.cpu().shape[-2:]:
             hr_t = F.interpolate(hr_t, size=sr_t.shape[-2:],
                                   mode='bicubic', align_corners=False).clamp(0,1)
-
         result["hr_t"]       = hr_t
         result["psnr_bic"]   = psnr(bic_t.cpu(), hr_t)
         result["psnr_sr"]    = psnr(sr_t.cpu(),  hr_t)
@@ -241,12 +274,14 @@ def run_inference(lr_path, hr_path=None):
 # PAIRED DATASET MATCHER
 # ─────────────────────────────────────────
 def match_pairs(hr_folder, lr_folder):
-    """Match HR and LR files by stem name. Returns list of (hr_path, lr_path)."""
-    hr_dict = {os.path.splitext(os.path.basename(p))[0]: p
-               for p in list_images(hr_folder)}
-    lr_dict = {os.path.splitext(os.path.basename(p))[0]: p
-               for p in list_images(lr_folder)}
-    # Handle DIV2K "0001x4.png" naming (strip x4/X4 suffix)
+    """Match HR and LR files by stem name."""
+    hr_imgs = list_images(hr_folder)
+    lr_imgs = list_images(lr_folder)
+    if not hr_imgs or not lr_imgs:
+        return []
+
+    hr_dict = {os.path.splitext(os.path.basename(p))[0]: p for p in hr_imgs}
+    lr_dict = {os.path.splitext(os.path.basename(p))[0]: p for p in lr_imgs}
     lr_clean = {}
     for stem, path in lr_dict.items():
         clean = stem.replace('x4','').replace('X4','')
@@ -262,10 +297,13 @@ def match_pairs(hr_folder, lr_folder):
 # FULL DATASET EVALUATION
 # ─────────────────────────────────────────
 def evaluate_dataset(hr_folder, lr_folder, dataset_name, max_images=None):
-    """
-    Evaluate all LR/HR pairs in a folder.
-    Returns list of per-image result dicts and prints summary.
-    """
+    if not os.path.isdir(hr_folder):
+        print(f"  ⚠ HR folder not found: {hr_folder}")
+        return []
+    if not os.path.isdir(lr_folder):
+        print(f"  ⚠ LR folder not found: {lr_folder}")
+        return []
+
     pairs = match_pairs(hr_folder, lr_folder)
     if not pairs:
         print(f"  ✗ No paired images found for {dataset_name}")
@@ -305,12 +343,7 @@ def evaluate_dataset(hr_folder, lr_folder, dataset_name, max_images=None):
 # VISUALIZATION — 4-column grid
 # ─────────────────────────────────────────
 def visualize(results, dataset_name, n=6, save_name=None):
-    """
-    Plot n sample results: LR | Bicubic | SR (Ours) | HR
-    Each column annotated with PSNR/SSIM.
-    """
     samples = random.sample(results, min(n, len(results)))
-    cols    = ["LR Input", "Bicubic (baseline)", "SR Output (Ours)", "HR Ground Truth"]
     has_hr  = "hr_t" in samples[0]
     n_cols  = 4 if has_hr else 3
 
@@ -334,14 +367,12 @@ def visualize(results, dataset_name, n=6, save_name=None):
         bic_np = to_numpy(r["bic_t"])
         fname  = os.path.basename(r["lr_path"])
 
-        # Column 0 — LR
         axs[row][0].imshow(lr_np, cmap=cmap)
         axs[row][0].set_title("LR Input", fontsize=10, fontweight="bold")
         axs[row][0].set_xlabel(
             f"{lr_np.shape[1]}×{lr_np.shape[0]}px\n{fname}", fontsize=8
         )
 
-        # Column 1 — Bicubic
         axs[row][1].imshow(bic_np, cmap=cmap)
         axs[row][1].set_title("Bicubic", fontsize=10)
         if has_hr:
@@ -349,7 +380,6 @@ def visualize(results, dataset_name, n=6, save_name=None):
                 f"PSNR: {r['psnr_bic']:.2f} dB\nSSIM: {r['ssim_bic']:.4f}", fontsize=8
             )
 
-        # Column 2 — SR (ours)
         axs[row][2].imshow(sr_np, cmap=cmap)
         axs[row][2].set_title("SR (Ours) ★", fontsize=10, color="green", fontweight="bold")
         if has_hr:
@@ -364,7 +394,6 @@ def visualize(results, dataset_name, n=6, save_name=None):
                 f"{sr_np.shape[1]}×{sr_np.shape[0]}px (upscaled ×{SCALE})", fontsize=8
             )
 
-        # Column 3 — HR ground truth (if available)
         if has_hr and n_cols == 4:
             hr_np = to_numpy(r["hr_t"])
             axs[row][3].imshow(hr_np, cmap=cmap)
@@ -395,7 +424,7 @@ div2k_results = evaluate_dataset(
     hr_folder=DIV_VAL_HR,
     lr_folder=DIV_VAL_LR,
     dataset_name="DIV2K Validation",
-    max_images=100    # use all 100 validation images
+    max_images=100
 )
 if div2k_results:
     visualize(div2k_results, "DIV2K Validation", n=6,
@@ -413,7 +442,7 @@ sat_results = evaluate_dataset(
     hr_folder=SAT_HR,
     lr_folder=SAT_LR,
     dataset_name="Satellite (4× SR)",
-    max_images=None   # use all available satellite pairs
+    max_images=None
 )
 if sat_results:
     visualize(sat_results, "Satellite SR", n=6,
@@ -481,7 +510,6 @@ print("  FINAL SUMMARY")
 print("="*70)
 if rows:
     headers = list(rows[0].keys())
-    # header row
     print("  " + "  ".join(f"{h:<20}" for h in headers))
     print("  " + "─"*65)
     for row in rows:
