@@ -59,14 +59,32 @@ for _c in CHECKPOINT_CANDIDATES:
         CHECKPOINT = _c
         break
 
+# --- Auto-detect dataset paths ---
+def find_dataset_folder(name):
+    """Search for a dataset folder by name under /kaggle/input/"""
+    # Direct path (old Kaggle structure)
+    direct = f"/kaggle/input/{name}"
+    if os.path.isdir(direct):
+        return direct
+    # New Kaggle structure: /kaggle/input/datasets/<username>/<name>
+    datasets_root = "/kaggle/input/datasets"
+    if os.path.isdir(datasets_root):
+        for user in os.listdir(datasets_root):
+            candidate = os.path.join(datasets_root, user, name)
+            if os.path.isdir(candidate):
+                return candidate
+    return direct  # fallback to direct path (will show helpful error)
+
 # Satellite test images
-SAT_HR      = "/kaggle/input/4x-satellite-image-super-resolution/HR_0.5m"
-SAT_LR      = "/kaggle/input/4x-satellite-image-super-resolution/LR_2m"
+_sat_base = find_dataset_folder("4x-satellite-image-super-resolution")
+SAT_HR    = os.path.join(_sat_base, "HR_0.5m")
+SAT_LR    = os.path.join(_sat_base, "LR_2m")
 
 # DIV2K validation (test split)
-DIV_BASE    = "/kaggle/input/div2k-dataset-for-super-resolution/Dataset"
-DIV_VAL_HR  = os.path.join(DIV_BASE, "DIV2K_valid_HR")
-DIV_VAL_LR  = os.path.join(DIV_BASE, "DIV2K_valid_LR_bicubic_X4")
+_div_base  = find_dataset_folder("div2k-dataset-for-super-resolution")
+DIV_BASE   = os.path.join(_div_base, "Dataset")
+DIV_VAL_HR = os.path.join(DIV_BASE, "DIV2K_valid_HR")
+DIV_VAL_LR = os.path.join(DIV_BASE, "DIV2K_valid_LR_bicubic_X4")
 
 SCALE       = 4
 IN_CH       = 3
