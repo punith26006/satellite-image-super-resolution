@@ -77,8 +77,18 @@ def find_dataset_folder(name):
 
 # Satellite test images
 _sat_base = find_dataset_folder("4x-satellite-image-super-resolution")
-SAT_HR    = os.path.join(_sat_base, "HR_0.5m")
-SAT_LR    = os.path.join(_sat_base, "LR_2m")
+
+def resolve_nested(path):
+    """Handle double-nested folders like HR_0.5m/HR_0.5m/"""
+    if os.path.isdir(path):
+        contents = os.listdir(path)
+        # If folder contains only one subfolder with the same basename, go deeper
+        if len(contents) == 1 and os.path.isdir(os.path.join(path, contents[0])):
+            return os.path.join(path, contents[0])
+    return path
+
+SAT_HR    = resolve_nested(os.path.join(_sat_base, "HR_0.5m"))
+SAT_LR    = resolve_nested(os.path.join(_sat_base, "LR_2m"))
 
 # DIV2K validation (test split)
 _div_base  = find_dataset_folder("div2k-dataset-for-super-resolution")
