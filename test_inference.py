@@ -93,8 +93,8 @@ SAT_LR    = resolve_nested(os.path.join(_sat_base, "LR_2m"))
 # DIV2K validation (test split)
 _div_base  = find_dataset_folder("div2k-dataset-for-super-resolution")
 DIV_BASE   = os.path.join(_div_base, "Dataset")
-DIV_VAL_HR = os.path.join(DIV_BASE, "DIV2K_valid_HR")
-DIV_VAL_LR = os.path.join(DIV_BASE, "DIV2K_valid_LR_bicubic_X4")
+DIV_VAL_HR = resolve_nested(os.path.join(DIV_BASE, "DIV2K_valid_HR"))
+DIV_VAL_LR = resolve_nested(os.path.join(DIV_BASE, "DIV2K_valid_LR_bicubic_X4"))
 
 SCALE       = 4
 IN_CH       = 3
@@ -470,7 +470,7 @@ sat_results = evaluate_dataset(
     hr_folder=SAT_HR,
     lr_folder=SAT_LR,
     dataset_name="Satellite (4× SR)",
-    max_images=None
+    max_images=20     # limit for quick testing (set None for all)
 )
 if sat_results:
     visualize(sat_results, "Satellite SR", n=6,
